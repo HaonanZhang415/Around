@@ -8,6 +8,9 @@ import( "fmt"
 	elastic "gopkg.in/olivere/elastic.v3"
 	"reflect"
 	"github.com/pborman/uuid"
+	"context"
+	"cloud.google.com/go/storage"
+	"io"
 )
 
 type Location struct {
@@ -19,6 +22,7 @@ type Post struct {
 	User string `json:"user"`
 	Message string `json:"message"`
 	Location Location `json:"location"`
+	Url string `json:"url"`
 }
 
 const(
@@ -26,6 +30,7 @@ const(
 	TYPE = "post"
 	DISTANCE = "200km"
 	ES_URL = "http://35.225.138.30:9200"
+	BUCKET_NAME = "post-images-237506"
 )
 
 func main(){
@@ -66,20 +71,39 @@ client, err := elastic.NewClient(elastic.SetURL(ES_URL), elastic.SetSniff(false)
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-func handlerPost(w http.ResponseWriter, r *http.Request){
-	fmt.Println("Received one post request")
 
-	decoder := json.NewDecoder(r.Body)
-	var p Post
-	if err := decoder.Decode(&p); err != nil{
-		panic(err)
-	}
+func saveToGCS(ctx context.Context, r io.Reader, bucketName, name string) (*storage.ObjectHandle, *storage.ObjectAttrs, error) {
+      client, err := storage.NewClient(ctx)
+      if err != nil {
+             return nil, nil, err
+      }
+      defer client.Close()
 
-	fmt.Fprintf(w, "Post Received: %s\n", p.Message)
+      bucket := client.Bucket(bucketName)
+      // Next check if the bucket exists
+      if _, err = bucket.Attrs(ctx); err != nil {
+             return nil, nil, err
+      }
 
-	id := uuid.New()
-	saveToES(&p, id)
+      obj := bucket.Object(name)
+      w := obj.NewWriter(ctx)
+      if _, err := io.Copy(w, r); err != nil {
+             return nil, nil, err
+      }
+      if err := w.Close(); err != nil {
+             return nil, nil, err
+      }
+
+      
+      if err := obj.ACL().Set(ctx, storage.AllUsers, storage.RoleReader); err != nil {
+             return nil, nil, err
+      }
+
+      attrs, err := obj.Attrs(ctx)
+      fmt.Printf("Post is saved to GCS: %s\n", attrs.MediaLink)
+      return obj, attrs, err
 }
+
 
 func saveToES(p *Post, id string){
 	es_client, err := elastic.NewClient(elastic.SetURL(ES_URL), elastic.SetSniff(false))
